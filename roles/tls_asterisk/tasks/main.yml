@@ -1,0 +1,288 @@
+---
+- name: 1.Install EPEL repo.
+  yum:
+    name: epel-release
+    state: present
+
+
+- name: 2.Install asterisk pre-requisites via yum
+  yum: "pkg={{item}} state=installed"
+  with_items:
+    - kernel-headers
+    - gcc
+    - gcc-c++
+    - cpp
+    - ncurses
+    - ncurses-devel
+    - libxml2
+    - libxml2-devel
+    - sqlite
+    - sqlite-devel
+    - openssl-devel
+    - kernel-devel
+    - libuuid-devel
+    - net-snmp-devel
+    - bzip2
+    - make
+    - libsrtp
+    - unixODBC
+    - mysql-connector-odbc
+    - mariadb-server
+    - mariadb
+    - python-pip
+    - python-devel
+    - mariadb-devel
+    - wget
+
+- name: 3.Upgrade pip
+  pip:
+    name: pip
+    extra_args: --upgrade
+
+- name: 4.pip mysqlclient
+  pip:
+    name: mysqlclient
+
+- name: 5.pip alembic
+  pip:
+    name: alembic
+
+- name: 6.Disable SELINUX
+  selinux:
+    state: disabled
+
+- name: 7.Upgrade all packages
+  yum:
+    name: '*'
+    state: latest
+    update_cache: true
+
+- name: 8.Install various groups of packages
+  yum:
+    name: "{{ item }}"
+    state: present
+  with_items:
+    - '@core'
+    - '@base'
+    - "@Development tools"
+
+- name: 9.Add Asterisk user
+  user:
+    name: asterisk
+    state: present
+    comment: "Asterisk User"
+
+
+- name: 10.Make sure web and database services are started and enabled
+  service:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  with_items: "{{ deploy_db }}"
+
+- name: 11.Remove test database and access to it
+  command: 'mysql -ne "{{ item }}"'
+  with_items:
+    - DROP DATABASE test
+    - DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'
+  changed_when: False
+  ignore_errors: True
+
+- name: 12.Reload privilege tables
+  command: 'mysql -ne "{{ item }}"'
+  with_items:
+    - FLUSH PRIVILEGES
+  changed_when: False
+
+- name: 13.Create a new database with name 'asterisk'
+  mysql_db:
+      name: asterisk
+      state: present
+
+- name: 14.setup mysql root password
+  command: 'mysqladmin password "{{ mysqlpass }}"'
+
+
+- name: 14.Download and extract jansson
+  unarchive:
+    src: "{{ item }}"
+    dest: /usr/src
+    remote_src: yes
+  with_items: "{{ deploy_jansson_packages }}"
+
+- name: 15.Find jansson path
+  find:
+    file_type: directory
+    paths: /usr/src
+    patterns: "^jansson"
+    use_regex: yes
+  register: jannsson_path
+
+- name: 16.Configure and install jannsson
+  command: "{{ item.command }}"
+  args:
+    chdir: "{{ jannsson_path.files.0.path }}"
+    creates: "{{ item.creates }}"
+  with_items:
+    - { command: 'autoreconf -i', creates: "{{ jannsson_path.files.0.path }}/install-sh" }
+    - { command: './configure --libdir=/usr/lib64', creates: "{{ jannsson_path.files.0.path }}/jansson.pc" }
+    - { command: 'make', creates: "{{ jannsson_path.files.0.path }}/src/.libs/" }
+    - { command: 'make install', creates: '/usr/local/include/jansson.h' }
+
+- name: 17.Download SRTP
+  unarchive:
+      src: https://downloads.sourceforge.net/project/srtp/srtp/1.4.4/srtp-1.4.4.tgz
+      dest: /opt
+      remote_src: yes
+
+- name: 18.Fix test script
+  lineinfile:
+      path: /opt/srtp/test/rtpw_test.sh
+      regexp: "RTPW=rtpw"
+      line: "RTPW=./rtpw"
+
+- name: 19.Install SRTP
+  command: "{{ item }} chdir=/opt/srtp"
+  with_items:
+    - autoconf
+    - ./configure CFLAGS=-fPIC --prefix=/usr
+    - make
+    - make runtest
+    - make uninstall
+    - make install
+    - ldconfig
+
+- name: 20.Download and extract Asterisk packages
+  unarchive:
+    src: "{{ item }}"
+    dest: /usr/src
+    remote_src: yes
+  with_items: "{{ deploy_asterisk_packages }}"
+
+- name: 21.Find Asterisk path
+  find:
+    file_type: directory
+    paths: /usr/src
+    patterns: "^asterisk"
+    use_regex: yes
+  register: asterisk_path
+
+- name: 22.Install Asterisk prereqs - call a *magic* script
+  command: "contrib/scripts/install_prereq install"
+  args:
+    chdir: "{{ asterisk_path.files.0.path }}"
+  changed_when: false
+
+- name: 23.Configure and install asterisk
+  command: "{{ item.command }}"
+  args:
+    chdir: "{{ asterisk_path.files.0.path }}"
+    creates: "{{ item.creates }}"
+  with_items:
+    - { command: './configure --libdir=/usr/lib64 --with-jansson-bundled --with-crypto --with-ssl=ssl --with-srtp --with-pjproject-bundled', creates: "{{ asterisk_path.files.0.path }}/config.log" }
+    - { command: 'contrib/scripts/get_mp3_source.sh', creates: "{{ asterisk_path.files.0.path }}/addons/mp3" }
+
+- name: 24.Run final install for Asterisk
+  command: "{{ item.command }}"
+  args:
+    chdir: "{{ asterisk_path.files.0.path }}"
+    creates: "{{ item.creates }}"
+  register: install_asterisk
+  with_items:
+    - { command: 'make menuselect.makeopts', creates: "{{ asterisk_path.files.0.path }}/codecs/.makeopts" }
+    - { command: 'make', creates: "{{ asterisk_path.files.0.path }}/main/utils.o" }
+    - { command: 'make install', creates: "/usr/sbin/asterisk" }
+    - { command: 'mkdir -p /etc/asterisk/keys', creates: "/etc/asterisk/keys" }
+
+
+- name: 25.Run final commands and config only after install
+  command: "{{ item }}"
+  args:
+    chdir: "{{ asterisk_path.files.0.path }}"
+  with_items:
+    - make config
+    - ldconfig
+  when: install_asterisk.changed
+
+
+- name: 26.Make sure the default asterisk service is disabled
+  service:
+    name: "asterisk"
+    enabled: yes
+
+
+- name: 27.Make sure everything is owned by asterisk user
+  file:
+    path: "{{ item }}"
+    owner: asterisk
+    recurse: yes
+  with_items:
+    - /var/run/asterisk
+    - /etc/asterisk
+    - /var/lib/asterisk
+    - /var/log/asterisk
+    - /var/spool/asterisk
+    - /usr/lib64/asterisk
+    - /var/www/
+
+- name: 28.setup configs
+  copy:
+      src: ../files/conf/asterisk/
+      dest: /etc/asterisk/
+
+- name: 29.setup odbc
+  copy:
+      src: ../files/conf/odbc.ini
+      dest: /etc/odbc.ini
+
+
+- name: 30.prepare alembic config
+  command: "{{ item }}"
+  args:
+      chdir: "{{ asterisk_path.files.0.path }}/contrib/ast-db-manage/"
+  with_items:
+      - cp config.ini.sample config.ini
+
+- name: 31.setup mysql password for alembic
+  lineinfile:
+      dest: "{{ asterisk_path.files.0.path }}/contrib/ast-db-manage/config.ini"
+      regexp: "^sqlalchemy.url = mysql.*"
+      line: "sqlalchemy.url = mysql://root:{{ mysqlpass }}@localhost/asterisk"
+
+
+- name: 32.alembic upgrade
+  args:
+      chdir: "{{ asterisk_path.files.0.path }}/contrib/ast-db-manage/"
+  command: alembic -c config.ini upgrade head
+
+
+- name: 33.setup mysql password for odbc
+  lineinfile:
+      dest: /etc/odbc.ini
+      state: present
+      line: "Password = {{ mysqlpass }}"
+
+
+- name: 34.setup mysql password for resodbc
+  lineinfile:
+      dest: /etc/asterisk/res_odbc.conf
+      state: present
+      line: "password = {{ mysqlpass }}"
+
+
+- name: 35.copy tls scripts
+  copy:
+      src: ../files/scripts/
+      dest: /root/
+      mode: 0770
+
+
+- name: 36.ca keys
+  args:
+      chdir: /root/
+  command: ./ast_tls_cert -C "{{ inventory_hostname }}" -O "{{ pbxname }}" -d /etc/asterisk/keys -p "{{ keypass }}"
+
+- name: 37.Restart asterisk
+  service:
+    name: "asterisk"
+    state: restarted

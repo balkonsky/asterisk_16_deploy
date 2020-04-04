@@ -1,0 +1,9 @@
+---
+deploy_db: [ mariadb ]
+
+deploy_jansson_packages:
+  - http://www.digip.org/jansson/releases/jansson-2.12.tar.gz
+
+deploy_asterisk_packages:
+  - http://downloads.asterisk.org/pub/telephony/libpri/libpri-current.tar.gz
+  - http://downloads.asterisk.org/pub/telephony/asterisk/asterisk-16-current.tar.gz

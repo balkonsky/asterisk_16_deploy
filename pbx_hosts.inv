@@ -1,0 +1,10 @@
+[astclust_servers]
+test-astclust1 ansible_host=
+test-astclust2 ansible_host=
+
+[astcc_servers]
+test-astcc1 ansible_host=
+
+[all:vars]
+ansible_user=deploy
+ansible_ssh_private_key_file=/home/mavramenko/.ssh/id_rsa
